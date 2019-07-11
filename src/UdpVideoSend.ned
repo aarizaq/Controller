@@ -17,7 +17,7 @@
 //
 
 
-package src;
+package Controller.src;
 
 import inet.applications.contract.IApp;
 
@@ -48,18 +48,16 @@ simple UdpVideoSend like IApp
     parameters:        
         string interfaceTableModule;   // The path to the InterfaceTable module        
         int localPort; // port to listen on
-        double energy;
-        double consumptionPerTimeUnits;
-        double energyEvalInterval @unit(s);
-        double sendingStatusInterval @unit(s);
+        double energy; // initial energy of the node
+        double consumptionPerTimeUnits; // consumption per unit time
+        double energyEvalInterval @unit(s); // interval to evaluate the consumption
         int maxNumHops = default(4);
         
-        volatile double actualizeTimer @units(s);
-        double startTimer @unit(s) = uniform(0s,1s);
+        volatile double actualizeTimer @unit(s); // inteval between actualization status packets
+        double startTimer @unit(s) = uniform(0s,1s); // break the synchronization between nodes
         
         volatile double sendInterval @unit(s); // interval between sending video stream packets
         volatile int packetLen @unit(B);  // length of a video packet in bytes
-        volatile int videoSize @unit(B);  // length of full a video stream in bytes
         volatile double stopTime @unit(s) = default(0);
         string traceFileName = default(""); // University arizona video trace format
         bool macroPackets = default(false); // it allows that several video frames can be grouped in a packet

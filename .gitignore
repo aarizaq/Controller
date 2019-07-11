@@ -7,30 +7,20 @@ src/Makefile.vc
 *_sm.cc
 .oppfeaturestate
 .nedexclusions
-src/inet/features.h
-src/inet/opp_defines.h
-precompiled_*.h.*
+Controller
+Controller_dbg
+Controller.exe
+Controller_dbg.exe
 /3rdparty
-/media
 **/MoBAN_Pattern*.txt
 
 # output and result files
 .settings/
-/doc/doxy/
-/doc/neddoc/
-/doc/src/manual/figures/*.pdf
-/doc/src/manual/inet-manual.pdf
-/doc/inet-manual-draft.pdf
 /examples/*/results/
 /examples/*/*/results/
 /examples/*/*/*/results/
 /examples/*/cache/
 /examples/*/*/cache/
-/tutorials/*/cache/
-/tutorials/*/data/
-/tests/*/work/
-/tests/*/*/work/
-/tests/*/results*/
 *.log
 *.sim
 *.pyc

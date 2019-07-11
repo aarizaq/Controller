@@ -124,7 +124,6 @@ void UdpVideoSend::initialize(int stage)
     {
         sendInterval = &par("sendInterval");
         packetLen = &par("packetLen");
-        videoSize = &par("videoSize");
         stopTime = &par("stopTime");
         localPort = par("localPort");
 
@@ -145,7 +144,6 @@ void UdpVideoSend::initialize(int stage)
             scheduleAt(simTime()+par("energyTimerEvaluation"),energyTimer);
         }
         senderControlTimer = new cMessage("senderControlTimer");
-        scheduleAt(simTime() + par("sendingStatusInterval"), senderControlTimer);
 
         energyTimer = new cMessage("energyTimer");
         remainingEnergy = par("energy");
@@ -522,7 +520,7 @@ void UdpVideoSend::processStreamRequest(Packet *msg)
     sendStreamData(timer);
 
     numStreams++;
-    emit(reqStreamBytesSignal, d->videoSize);
+    //emit(reqStreamBytesSignal, d->videoSize);
 }
 
 void UdpVideoSend::sendStreamData(cMessage *timer)
