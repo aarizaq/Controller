@@ -13,7 +13,7 @@
 // along with this program.  If not, see http://www.gnu.org/licenses/.
 // 
 
-package Controller.examples;
+package simulations;
 
 // numOfHosts: 5
 
@@ -21,8 +21,8 @@ import inet.networklayer.configurator.ipv4.Ipv4NetworkConfigurator;
 import inet.node.inet.WirelessHost;
 import inet.node.wireless.AccessPoint;
 import inet.physicallayer.ieee80211.packetlevel.Ieee80211ScalarRadioMedium;
-import Controller.src.Controller;
-import Controller.src.UdpVideoSend;
+import src.Controller;
+import src.UdpVideoSend;
 
 network ControllerExample
 {

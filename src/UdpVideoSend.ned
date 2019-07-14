@@ -17,7 +17,7 @@
 //
 
 
-package Controller.src;
+package src;
 
 import inet.applications.contract.IApp;
 
