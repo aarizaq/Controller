@@ -20,28 +20,150 @@ package simulations;
 import inet.networklayer.configurator.ipv4.Ipv4NetworkConfigurator;
 import inet.node.inet.WirelessHost;
 import inet.node.wireless.AccessPoint;
-import inet.physicallayer.ieee80211.packetlevel.Ieee80211ScalarRadioMedium;
+import inet.physicallayer.wireless.ieee80211.packetlevel.Ieee80211ScalarRadioMedium;
+import inet.physicallayer.wireless.unitdisk.UnitDiskRadioMedium;
 import src.Controller;
 import src.UdpVideoSend;
+import inet.node.inet.AdhocHost;
 
-network ControllerExample
+network ControllerOneArea
 {
     parameters:
         int numOfHosts;
 
     submodules:
-        radioMedium: Ieee80211ScalarRadioMedium {
+        radioMedium: UnitDiskRadioMedium {
             parameters:
-                @display("p=100,200;is=s");
+                @display("p=69.324,189.66;is=s");
         }
+        //radioMedium: Ieee80211ScalarRadioMedium {
+        //    parameters:
+        //        @display("p=100,200;is=s");
+        //}
         configurator: Ipv4NetworkConfigurator {
             @display("p=140,50");
-        }
-        host[numOfHosts]: WirelessHost {
-            @display("r=,,#707070");
         }
         controller: Controller {
             @display("p=35,34;r=,,#707070");
         }
+        
+        host[numOfHosts]: AdhocHost {
+            @display("r=,,#707070");
+        }
 
 }
+
+
+network ControllerFourArea
+{
+    parameters:
+        int numOfHosts;
+        int numSubArea = int(numOfHosts/4);
+
+    submodules:
+        radioMedium: UnitDiskRadioMedium {
+            parameters:
+                @display("p=69.324,189.66;is=s");
+        }
+        //radioMedium: Ieee80211ScalarRadioMedium {
+        //    parameters:
+        //        @display("p=100,200;is=s");
+        //}
+        configurator: Ipv4NetworkConfigurator {
+            @display("p=140,50");
+        }
+        controller: Controller {
+            @display("p=35,34;r=,,#707070");
+        }
+        host1[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host2[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host3[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host4[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+}
+
+
+
+
+network ControllerSixteenArea
+{
+    parameters:
+        int numOfHosts;
+        int numSubArea = int(numOfHosts/16);
+    submodules:
+        radioMedium: UnitDiskRadioMedium {
+            parameters:
+                @display("p=69.324,189.66;is=s");
+        }
+        //radioMedium: Ieee80211ScalarRadioMedium {
+        //    parameters:
+        //        @display("p=100,200;is=s");
+        //}
+        configurator: Ipv4NetworkConfigurator {
+            @display("p=140,50");
+        }
+        controller: Controller {
+            @display("p=35,34;r=,,#707070");
+        }        
+        host1[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host2[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host3[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host4[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host5[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host6[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host7[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host8[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host9[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        
+        host10[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host11[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host12[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host13[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host14[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+
+        host15[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        host16[numSubArea]: AdhocHost {
+            @display("r=,,#707070");
+        }
+        
+
+
+}
+

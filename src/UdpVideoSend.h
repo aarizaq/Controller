@@ -30,7 +30,9 @@
 #include "inet/applications/base/ApplicationBase.h"
 #include "inet/common/packet/Packet.h"
 #include "inet/transportlayer/contract/udp/UdpSocket.h"
+#include "inet/networklayer/contract/IRoutingTable.h"
 #include "Controller.h"
+#include "ControlPackets_m.h"
 #include "inet/mobility/contract/IMobility.h"
 #include <deque>
 
@@ -45,30 +47,64 @@ using namespace inet;
 
 class UdpVideoSend :  public ApplicationBase, public UdpSocket::ICallback
 {
+public:
+    struct ChData {
+        L3Address nextHop;
+        int distance;
+        Coord position;
+        Coord speed;
+        simtime_t lasTime;
+    };
+
+private:
     Controller *controller = nullptr;
     IMobility *mobility = nullptr;
     double remainingEnergy = -1;
-    double consumptionPerSec;
+    double initialEnergy = -1;
+    double consumptionPerSec = 0;
+    double percetajeIncreaseEnergy = 0;
     cMessage *energyTimer = nullptr;
     L3Address myAddress;
+
+    cMessage *selfMsg = nullptr;
 
     cMessage *actualizeStatus = nullptr;
 
     bool iamClusterHead = false;
 
-    struct ChData {
-        L3Address nextHop;
-        int distance;
-        simtime_t lasTime;
-    };
+    int controllerId = -1;
+    int zoneId = -1;
 
     std::map<L3Address, ChData > clusterHeads;
-
+    std::set<PacketHolderMessage *> pendingSend;
 
     cMessage *senderControlTimer;
     std::deque<cPacket *> queueToControl;
     uint64_t seqNumber = 0;
     std::map<L3Address,uint64_t> seqNumbers;
+
+    cPar *jitterPar = nullptr;
+    cPar *periodicJitter = nullptr;
+    simtime_t advertInterval;
+
+    cMessage *advertCluster = nullptr;
+
+    uint64_t totalSendP = 0;
+    uint64_t totalSendI = 0;
+    uint64_t totalSendB = 0;
+
+    uint64_t totalBytesSendP = 0;
+    uint64_t totalBytesSendI = 0;
+    uint64_t totalBytesSendB = 0;
+
+    uint64_t totalBytesSendPCh = 0;
+    uint64_t totalBytesSendICh = 0;
+    uint64_t totalBytesSendBCh = 0;
+
+    uint64_t totalBytesSendPCl = 0;
+    uint64_t totalBytesSendICl = 0;
+    uint64_t totalBytesSendBCl = 0;
+
   public:
     /**
      * Stores information on a video stream
@@ -85,6 +121,8 @@ class UdpVideoSend :  public ApplicationBase, public UdpSocket::ICallback
         simtime_t timeInit;
         VideoStreamData() { timer = nullptr; videoSize = bytesLeft = 0; numPkSent = 0; }
     };
+
+    uint64_t lastSeqNum = 0;
 
     struct VideoInfo
     {
@@ -112,17 +150,38 @@ class UdpVideoSend :  public ApplicationBase, public UdpSocket::ICallback
     cPar *videoSize;
     cPar *stopTime;
 
+    IRoutingTable *routingTable = nullptr;
+    IInterfaceTable *interfaceTable = nullptr;
+
     // statistics
     unsigned int numStreams;  // number of video streams served
     unsigned long numPkSent;  // total number of packets sent
     static simsignal_t reqStreamBytesSignal;  // length of video streams served
     static simsignal_t sentPkSignal;
 
+  public:
+    double getInitalEnergy() {return initialEnergy;}
+    double getRemainEnergy() { return remainingEnergy;}
+    double getConsumedEnergy() {return (initialEnergy - remainingEnergy);}
+
+    uint64_t getTotalBytesSendP() {return totalBytesSendP;}
+    uint64_t getTotalBytesSendI() {return totalBytesSendI;}
+    uint64_t getTotalBytesSendB() {return totalBytesSendB;}
+
+    uint64_t getTotalSendP() {return totalSendP;}
+    uint64_t getTotalSendI() {return totalSendI;}
+    uint64_t getTotalSendB() {return totalSendB;}
+
+    uint64_t getTotalBytesSendPCh() {return totalBytesSendPCh;}
+    uint64_t getTotalBytesSendICh() {return totalBytesSendICh;}
+    uint64_t getTotalBytesSendBCh() {return totalBytesSendBCh;}
+
+    uint64_t getTotalBytesSendPCl() {return totalBytesSendPCl;}
+    uint64_t getTotalBytesSendICl() {return totalBytesSendICl;}
+    uint64_t getTotalBytesSendBCl() {return totalBytesSendBCl;}
   protected:
-
-
     virtual void deleteClusterHead(const L3Address &);
-    virtual void addClusterHead(const L3Address &, const int & distance, const L3Address &);
+    virtual void addClusterHead(const L3Address &, const int & distance, const L3Address &, const Coord &, const Coord &);
     virtual bool getBestClusterHead(L3Address &); // return false if there isn't a cluster head
     virtual L3Address getNextHopBestClusterHead(); // return false if there isn't a cluster head
 
@@ -130,7 +189,8 @@ class UdpVideoSend :  public ApplicationBase, public UdpSocket::ICallback
 
 
     virtual void notifyEndClusterHead();
-    virtual void notifyNewClusterHead();
+    virtual void notifyNewClusterHead(const simtime_t &);
+    virtual void refreshClusterHead();
 
     virtual void sendToControl(cPacket *);
 

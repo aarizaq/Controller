@@ -15,17 +15,25 @@
 
 import inet.common.INETDefs;
 import inet.common.packet.chunk.Chunk;
+import inet.common.packet.Packet;
 import inet.networklayer.common.L3Address;
 import inet.common.geometry.Geometry;
 
+enum KindDelayEnum {
+     KIND_DELAYEDSEND = 100;
+     KIND_SMALLDELAY = 101;
+     }
+
+
 enum PacketType
 {    
-    STARTVIDEO = 1;
-    STOPVIDEO = 2;
+    STARTCLUSTERHEAD = 1;
+    STOPCLUSTERHEAD = 2;
     CONTROLDATA = 3;
     VIDEODATA = 4;
     CHADVERT = 5;
     CHENDADVERT = 6;
+    REQUESTSTATUS = 7;
 };
 
 
@@ -42,6 +50,10 @@ class AdvertClusterHead extends ControlPacket
     int numHops;
     uint64_t seqNumber;
     int distance;
+    inet::Coord position;
+    inet::Coord speed;
+    int controllerId = 0; // at least it will use controller 0
+    int zone = 0;
 }
 
 class ActualizeData extends ControlPacket
@@ -49,8 +61,16 @@ class ActualizeData extends ControlPacket
     typePacket = CONTROLDATA;
     inet::Coord position;
     inet::Coord speed;
+    inet::Coord constraintAreaMax;
+    inet::Coord constraintAreaMin;
+    int controllerId = 0; // at least it will use controller 0
+    int zone = 0;
     double energy;
 }
 
-
+message PacketHolderMessage
+{
+    kind = KIND_DELAYEDSEND;
+    inet::Packet *ownedPacket @owned;
+}
 

@@ -24,6 +24,21 @@ simple Controller
      volatile double bitRate @unit(bps) = default(10Mbps);
      volatile double FirstComputation @unit(s) = default(0s);
      volatile double computeInterval @unit(s) = default(5s);
+     double MINDISTANCECH @unit(m);
+     bool recordOnlyTotal = true;
+     bool UseGso = default(false);
+     
+     double stopValue = default(20);
+     string stopType @enum("absolute", "percentage","distance") = default("absolute");
+
+     @signal[TotalAreaRecorded];
+     @signal[NumDronesSelected];
+      
+      @signal[rcvdPk](type=cPacket);
+      @statistic[rcvdPk](title="packets received"; source=rcvdPk; record=count,"sum(packetBytes)","vector(packetBytes)"; interpolationmode=none);
+      @statistic[areaRec](title="total Area recorded"; source=TotalAreaRecorded;  record=histogram,vector; interpolationmode=none);
+      @statistic[numNodes](title="nodes selected"; source=NumDronesSelected;  record=histogram,vector; interpolationmode=none);
+      @statistic[endToEndDelay](title="delay"; source="dataAge(rcvdPk)"; unit=s; record=histogram,vector; interpolationmode=none);
    
   gates:
     input directGate @directIn;

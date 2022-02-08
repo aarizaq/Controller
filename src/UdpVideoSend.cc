@@ -29,6 +29,7 @@
 #include "inet/applications/udpapp/VideoPacket_m.h"
 #include "UdpVideoSend.h"
 #include "inet/networklayer/common/L3AddressResolver.h"
+#include "inet/linklayer/common/InterfaceTag_m.h"
 #include "inet/common/ModuleAccess.h"
 #include "inet/common/TimeTag_m.h"
 #include "inet/common/packet/chunk/ByteCountChunk.h"
@@ -40,6 +41,13 @@
 
 
 Define_Module(UdpVideoSend);
+
+inline std::ostream& operator<<(std::ostream& os, UdpVideoSend::ChData obj)
+{
+    os << "Dist :" << obj.distance << " Next hop << " << obj.nextHop << " Last t " << obj.lasTime;
+    return os;
+}
+
 
 simsignal_t UdpVideoSend::reqStreamBytesSignal = registerSignal("reqStreamBytes");
 simsignal_t UdpVideoSend::sentPkSignal = registerSignal("sentPk");
@@ -110,11 +118,26 @@ UdpVideoSend::UdpVideoSend()
 
 UdpVideoSend::~UdpVideoSend()
 {
+    cancelAndDelete(selfMsg);
     if (energyTimer)
         cancelAndDelete(energyTimer);
     clearStreams();
     trace.clear();
     cancelAndDelete(senderControlTimer);
+    for (auto &elem: queueToControl)
+        delete elem;
+    for (auto &elem : streamVector) {
+        cancelAndDelete(elem.timer);
+    }
+    cancelAndDelete(actualizeStatus);
+    while (!pendingSend.empty()) {
+        auto it =  pendingSend.begin();
+        auto timer = *it;
+        pendingSend.erase(it);
+        delete timer;
+    }
+    if (advertCluster)
+        cancelAndDelete(advertCluster);
 }
 
 void UdpVideoSend::initialize(int stage)
@@ -139,30 +162,46 @@ void UdpVideoSend::initialize(int stage)
         if (!fileName.empty())
             fileParser(fileName.c_str());
         // read energy before
-        if (remainingEnergy != -1) {
-            energyTimer = new cMessage("Energy timer");
-            scheduleAt(simTime()+par("energyTimerEvaluation"),energyTimer);
-        }
+        energyTimer = new cMessage("Energy timer");
+
         senderControlTimer = new cMessage("senderControlTimer");
 
-        energyTimer = new cMessage("energyTimer");
         remainingEnergy = par("energy");
+        initialEnergy = remainingEnergy;
         consumptionPerSec =  par("consumptionPerTimeUnits");
+        percetajeIncreaseEnergy = par("percetajeIncreaseEnergyClusterHeads").doubleValue()/100.0;
 
         scheduleAt(simTime() + par("energyEvalInterval"), energyTimer);
 
         actualizeStatus = new cMessage("ActualizeStatus");
         scheduleAt(simTime() + par("startTimer") + par("actualizeTimer"), actualizeStatus);
+
+        jitterPar = &par("jitter");
+        periodicJitter = &par("periodicJitter");
+        advertCluster = new cMessage("Avert Cluster Timer");
+        advertInterval = par("advertInterval");
+        selfMsg = new cMessage("startEvent");
+        WATCH(iamClusterHead);
+        WATCH_MAP(clusterHeads);
     }
     else if (stage == INITSTAGE_APPLICATION_LAYER) {
 
+        socket.setOutputGate(gate("socketOut"));
+        socket.bind(localPort);
+        socket.setBroadcast(true);
+        socket.setCallback(this);
 
-        auto mod = cSimulation::getActiveSimulation()->getSystemModule()->getModuleByPath("controller");
+        controllerId = par("controllerNumber");
+        zoneId = par("zone");
+
+        interfaceTable = getModuleFromPar<IInterfaceTable>(par("interfaceTableModule"), this);
+
+        auto mod = cSimulation::getActiveSimulation()->getSystemModule()->getSubmodule("controller", controllerId);
         controller = check_and_cast<Controller *>(mod);
         auto node = getContainingNode(this);
         myAddress = L3AddressResolver().addressOf(node);
         mobility = check_and_cast<IMobility *>(node->getSubmodule("mobility"));
-        controller->registerModule(this, mobility->getCurrentPosition(), mobility->getCurrentVelocity(), remainingEnergy);
+        controller->registerModule(this, mobility, mobility->getCurrentPosition(), mobility->getCurrentVelocity(), remainingEnergy, mobility->getConstraintAreaMax(), mobility->getConstraintAreaMin(), zoneId);
     }
 }
 
@@ -173,25 +212,28 @@ void UdpVideoSend::deleteClusterHead(const L3Address & addr) {
         clusterHeads.erase(it);
 }
 
-void UdpVideoSend::addClusterHead(const L3Address & addr, const int & distance, const L3Address &next) {
+void UdpVideoSend::addClusterHead(const L3Address & addr, const int & distance, const L3Address &next, const Coord &position, const Coord &speed) {
     auto it = clusterHeads.find(addr);
     if (it == clusterHeads.end()) {
         ChData data;
         data.distance = distance;
         data.lasTime = simTime();
         data.nextHop = next;
+        data.position = position;
+        data.speed = speed;
         clusterHeads[addr] = data;
     }
     else {
         it->second.distance = distance;
         it->second.lasTime = simTime();
         it->second.nextHop = next;
+        it->second.position = position;
+        it->second.speed = speed;
     }
 }
 
 
 void UdpVideoSend::notifyEndClusterHead() {
-
     auto header = makeShared<AdvertClusterHead>();
     header->setOrigin(myAddress);
     header->setDestination(myAddress.getAddressType()->getBroadcastAddress());
@@ -199,39 +241,92 @@ void UdpVideoSend::notifyEndClusterHead() {
     header->setNumHops(par("maxNumHops"));
     header->setDistance(0);
     header->setTypePacket(CHENDADVERT);
-    header->setChunkLength(B(30)); // check the size it is important
+    header->setChunkLength(B(60)); // check the size it is important
+    header->setControllerId(controllerId); // at least it will use controller 0
+    header->setPosition(mobility->getCurrentPosition());
+    header->setSpeed(mobility->getCurrentVelocity());
+    header->setZone(zoneId);
     auto pkt = new Packet("CHENDADVERT");
     pkt->insertAtFront(header);
-    socket.sendTo(pkt, myAddress.getAddressType()->getBroadcastAddress(), localPort);
+    auto *timer = new PacketHolderMessage("LoadNg-send-jitter", KIND_DELAYEDSEND);
+    timer->setOwnedPacket(pkt);
+    pendingSend.insert(timer);
+    scheduleAt(simTime()+*jitterPar, timer);
+    //socket.sendTo(pkt, myAddress.getAddressType()->getBroadcastAddress(), localPort);
 }
 
-void UdpVideoSend::notifyNewClusterHead() {
+void UdpVideoSend::notifyNewClusterHead(const simtime_t &t) {
+    if (!iamClusterHead)
+        return;
+
     auto header = makeShared<AdvertClusterHead>();
     header->setOrigin(myAddress);
     header->setDestination(myAddress.getAddressType()->getBroadcastAddress());
     header->setSeqNumber(seqNumber++);
     header->setNumHops(par("maxNumHops"));
+    header->setPosition(mobility->getCurrentPosition());
+    header->setSpeed(mobility->getCurrentVelocity());
     header->setDistance(0);
     header->setTypePacket(CHADVERT);
     header->setChunkLength(B(30)); // check the size it is important
     auto pkt = new Packet("CHADVERT");
     pkt->insertAtFront(header);
+    auto *timer = new PacketHolderMessage("LoadNg-send-jitter", KIND_DELAYEDSEND);
+    timer->setOwnedPacket(pkt);
+    pendingSend.insert(timer);
+
+    if (t != SimTime::ZERO)
+        scheduleAt(simTime() + *jitterPar, timer);
+    else
+        scheduleAt(simTime() + t, timer);
+
+    scheduleAt(simTime() + advertInterval - *periodicJitter, advertCluster);
+    // socket.sendTo(pkt, myAddress.getAddressType()->getBroadcastAddress(), localPort);
+}
+
+void UdpVideoSend::refreshClusterHead() {
+    if (!iamClusterHead)
+        return;
+
+    auto header = makeShared<AdvertClusterHead>();
+    header->setOrigin(myAddress);
+    header->setDestination(myAddress.getAddressType()->getBroadcastAddress());
+    header->setSeqNumber(seqNumber++);
+    header->setNumHops(par("maxNumHops"));
+    header->setPosition(mobility->getCurrentPosition());
+    header->setSpeed(mobility->getCurrentVelocity());
+    header->setDistance(0);
+    header->setTypePacket(CHADVERT);
+    header->setChunkLength(B(30)); // check the size it is important
+    auto pkt = new Packet("CHADVERT");
+    pkt->insertAtFront(header);
+    int interfaceId = CHK(interfaceTable->findInterfaceByName(par("broadcastInterface")))->getInterfaceId(); // TODO: Implement: support for multiple interfaces
+    pkt->addTag<InterfaceReq>()->setInterfaceId(interfaceId);
     socket.sendTo(pkt, myAddress.getAddressType()->getBroadcastAddress(), localPort);
+    scheduleAt(simTime() + advertInterval - *periodicJitter, advertCluster);
 }
 
 
+
 bool UdpVideoSend::getBestClusterHead(L3Address &add) {
+    add = L3Address();
     if (clusterHeads.empty()) {
-        add = L3Address();
         return false; // return false if there isn't a cluster head
     }
     int min = 100000;
-    for (auto elem : clusterHeads) {
-        if (elem.second.distance < min) {
-            min = elem.second.distance;
-            add = elem.first;
+    for (auto it = clusterHeads.begin(); it != clusterHeads.end();) {
+        if ((simTime() - it->second.lasTime) > (par("allowedAdvertLoss").intValue() * advertInterval)) {
+            clusterHeads.erase(it++);
+            continue;
         }
+        if (it->second.distance < min) {
+            min = it->second.distance;
+            add = it->first;
+        }
+        ++it;
     }
+    if (add.isUnspecified() || add.isBroadcast())
+        return false;
     return true;
 }
 
@@ -241,12 +336,26 @@ L3Address UdpVideoSend::getNextHopBestClusterHead()
         return L3Address(); // return false if there isn't a cluster head
     }
     int min = 100000;
+    double disMin = 10000000;
+
     L3Address add;
-    for (auto elem : clusterHeads) {
-        if (elem.second.distance < min) {
-            min = elem.second.distance;
-            add = elem.second.nextHop;
+    for (auto it = clusterHeads.begin(); it != clusterHeads.end();) {
+        if ((simTime() - it->second.lasTime) > (par("allowedAdvertLoss").intValue() * advertInterval)) {
+            clusterHeads.erase(it++);
+            continue;
         }
+        double dis = mobility->getCurrentPosition().distance(it->second.position);
+        if (it->second.distance < min) {
+            min = it->second.distance;
+            add = it->second.nextHop;
+            disMin = dis;
+        }
+        else if (it->second.distance == min && dis < disMin) {
+            min = it->second.distance;
+            add = it->second.nextHop;
+            disMin = dis;
+        }
+        ++it;
     }
     return add;
 }
@@ -256,12 +365,28 @@ int UdpVideoSend::getDistanceClusterHead(const L3Address &add) {
     auto it = clusterHeads.find(add);
     if (it == clusterHeads.end())
         return -1;
+    if ((simTime() - it->second.lasTime) > (par("allowedAdvertLoss").intValue() * advertInterval)) {
+        clusterHeads.erase(it++);
+        return -1;
+    }
     return it->second.distance;
 }
 
 
 void UdpVideoSend::finish()
 {
+    if (!par("recordOnlyTotal")) {
+        recordScalar("Frames P sent: ", totalSendP);
+        recordScalar("Frames I sent: ", totalSendI);
+        recordScalar("Frames B sent: ", totalSendB);
+        recordScalar("Bytes P sent: ", totalBytesSendP);
+        recordScalar("Bytes I sent: ", totalBytesSendI);
+        recordScalar("Bytes B sent: ", totalBytesSendB);
+        recordScalar("Initial Energy", par("energy").doubleValue());
+        recordScalar("Remaining Energy", remainingEnergy);
+    }
+
+
 }
 
 void UdpVideoSend::sendToControl(cPacket *pkt)
@@ -292,42 +417,70 @@ void UdpVideoSend::handleTimer(cMessage *msg) {
         emit(sentPkSignal, pkt);
         scheduleAt(simTime()+duration, senderControlTimer);
         sendDirect(pkt, delay, duration, controller, "directGate");
+        return;
     }
     else if (energyTimer == msg) {
         if (remainingEnergy != -1) {
-            remainingEnergy -= (consumptionPerSec * par("energyEvalInterval").doubleValue());
+            if (this->iamClusterHead)
+                remainingEnergy -= ((consumptionPerSec + (percetajeIncreaseEnergy * consumptionPerSec)) * par("energyEvalInterval").doubleValue());
+            else
+                remainingEnergy -= (consumptionPerSec * par("energyEvalInterval").doubleValue());
             if (remainingEnergy < 0)
                 remainingEnergy = 0;
             if (remainingEnergy > 0)
                 scheduleAt(simTime() + par("energyEvalInterval"), energyTimer);
         }
+        return;
     }
     if (msg == actualizeStatus) {
         // Send new status message.
-
         L3Address ch;
         L3Address nextHop;
         if (!iamClusterHead) {
             if (getBestClusterHead(ch))
                 nextHop = getNextHopBestClusterHead();
         }
-        if (iamClusterHead || (!ch.isUnspecified() && nextHop.isUnspecified())) {
+        if (iamClusterHead || (!ch.isUnspecified() && !nextHop.isUnspecified())) {
             auto status = makeShared<ActualizeData>();
             status->setEnergy(remainingEnergy);
             status->setPosition(mobility->getCurrentPosition());
             status->setSpeed(mobility->getCurrentVelocity());
             status->setOrigin(myAddress);
             status->setChunkLength(B(20));
+            status->setConstraintAreaMax(mobility->getConstraintAreaMax());
+            status->setConstraintAreaMin(mobility->getConstraintAreaMin());
+            status->setControllerId(controllerId);
+            status->setZone(zoneId);
             auto packet = new Packet("ActualizePacket");
             packet->insertAtFront(status);
-            if (iamClusterHead)
+            if (iamClusterHead) {
                 sendToControl(packet);
-            else
+            }
+            else {
+                int interfaceId = CHK(interfaceTable->findInterfaceByName(par("broadcastInterface")))->getInterfaceId(); // TODO: Implement: support for multiple interfaces
+                packet->addTagIfAbsent<InterfaceReq>()->setInterfaceId(interfaceId);
                 socket.sendTo(packet, nextHop, localPort);
+            }
         }
-        scheduleAt(simTime() + par("actualizeTimer"), actualizeStatus);
-
+        scheduleAt(simTime() + par("actualizeTimer") - *jitterPar, actualizeStatus);
     }
+    else if (msg->getKind() == KIND_DELAYEDSEND) {
+        auto timer = check_and_cast<PacketHolderMessage*>(msg);
+        auto pkt = timer->removeOwnedPacket();
+        pkt->clearTags();
+        int interfaceId = CHK(interfaceTable->findInterfaceByName(par("broadcastInterface")))->getInterfaceId(); // TODO: Implement: support for multiple interfaces
+        pkt->addTagIfAbsent<InterfaceReq>()->setInterfaceId(interfaceId);
+        socket.sendTo(pkt, myAddress.getAddressType()->getBroadcastAddress(), localPort);
+        auto it = pendingSend.find(timer);
+        if (it != pendingSend.end())
+            pendingSend.erase(it);
+        delete timer;
+    }
+    else if (msg == advertCluster) {
+        refreshClusterHead();
+    }
+    else
+        throw cRuntimeError("Timer unknown %s", msg->getName());
     // Other timers
 
 }
@@ -368,24 +521,41 @@ void UdpVideoSend::handleControllerMessges(cPacket *pkt)
 
     // process incoming packet
     auto control = packet->peekAtFront<ControlPacket>();
-    if (control->getTypePacket() == STARTVIDEO) {
+    if (control->getTypePacket() == STARTCLUSTERHEAD) {
         if (!iamClusterHead) {
             iamClusterHead = true;
             // Start here to send the information that this node is now a cluster head
-            notifyNewClusterHead(); // Should be sending this notification periodically?
+            notifyNewClusterHead(*periodicJitter); // Should be sending this notification periodically?
         }
         processStreamRequest(packet);
     }
-    else if (control->getTypePacket() == STOPVIDEO) {
+    else if (control->getTypePacket() == STOPCLUSTERHEAD) {
         if (iamClusterHead) {
+            notifyEndClusterHead();
             iamClusterHead = false;
             // Notify here to the neighbor that this node is no more cluster head
-            notifyEndClusterHead();
         }
         processStopRequest(packet);
     }
+    else if (control->getTypePacket() == REQUESTSTATUS) {
+        auto status = makeShared<ActualizeData>();
+        status->setEnergy(remainingEnergy);
+        status->setPosition(mobility->getCurrentPosition());
+        status->setSpeed(mobility->getCurrentVelocity());
+        status->setOrigin(myAddress);
+        status->setChunkLength(B(20));
+        status->setConstraintAreaMax(mobility->getConstraintAreaMax());
+        status->setConstraintAreaMin(mobility->getConstraintAreaMin());
+        status->setControllerId(controllerId);
+        status->setZone(zoneId);
+        auto packet = new Packet("ActualizePacket");
+        packet->insertAtFront(status);
+        sendToControl(packet);
+        delete pkt;
+    }
 }
 
+#if 0
 void UdpVideoSend::socketDataArrived(UdpSocket *sock, Packet *packet)
 {
     // arrive messages of other nodes
@@ -393,7 +563,6 @@ void UdpVideoSend::socketDataArrived(UdpSocket *sock, Packet *packet)
             // check the type
     if (iamClusterHead && dynamicPtrCast<const ActualizeData> (chuck)) {
         // Connection with the controller active, assume cluster head
-
         sendToControl(packet);
         return;
     }
@@ -404,6 +573,10 @@ void UdpVideoSend::socketDataArrived(UdpSocket *sock, Packet *packet)
         // check the type
         if (dynamicPtrCast<const AdvertClusterHead> (chuck)) {
            auto clusterInfo = packet->removeAtFront<AdvertClusterHead>();
+           if (clusterInfo->getControllerId() != controllerId) {
+               delete packet;
+               return; // no correct controller
+           }
            // check if old packet
            auto sender = clusterInfo->getOrigin();
            auto sq = clusterInfo->getSeqNumber();
@@ -412,6 +585,7 @@ void UdpVideoSend::socketDataArrived(UdpSocket *sock, Packet *packet)
                delete packet;
                return;
            }
+
 
            // This only process the first packet, but it is possible to receive other packets with better routes to the CH
            // This should be take into account
@@ -430,7 +604,11 @@ void UdpVideoSend::socketDataArrived(UdpSocket *sock, Packet *packet)
            packet->insertAtFront(clusterInfo);
            if (clusterInfo->getNumHops() > 0) {
                // re-broadcast
-               socket.sendTo(packet, myAddress.getAddressType()->getBroadcastAddress(), localPort);
+               auto *timer = new PacketHolderMessage("LoadNg-send-jitter", KIND_DELAYEDSEND);
+               timer->setOwnedPacket(packet);
+               pendingSend.insert(timer);
+               scheduleAt(simTime()+*jitterPar, timer);
+//               socket.sendTo(packet, myAddress.getAddressType()->getBroadcastAddress(), localPort);
            }
            else
                delete packet;
@@ -448,6 +626,100 @@ void UdpVideoSend::socketDataArrived(UdpSocket *sock, Packet *packet)
             delete packet;
     }
 }
+
+#else
+void UdpVideoSend::socketDataArrived(UdpSocket *sock, Packet *packet)
+{
+    // arrive messages of other nodes
+    const auto chuck = packet->peekAtFront<FieldsChunk>();
+            // check the type
+    //if (iamClusterHead && dynamicPtrCast<const ActualizeData> (chuck)) {
+    if (iamClusterHead) {
+        // Connection with the controller active, assume cluster head
+        if (dynamicPtrCast<const AdvertClusterHead> (chuck) == nullptr)
+            sendToControl(packet);
+        else
+            delete packet; // ignore information packets of other CH
+        return;
+    }
+    else {
+        // redirect to the cluster head
+        // destAddr must be the next address to the cluster head or the cluster head
+        // check the type.
+        // check the type
+        if (dynamicPtrCast<const AdvertClusterHead> (chuck)) {
+            auto clusterInfo = packet->peekAtFront<AdvertClusterHead>();
+            if (clusterInfo->getControllerId() != controllerId) {
+                delete packet;
+                return; // no correct controller
+            }
+            // check if old packet
+
+            auto sender = clusterInfo->getOrigin();
+            auto sq = clusterInfo->getSeqNumber();
+            auto it = seqNumbers.find(sender);
+            if (it != seqNumbers.end() && it->second >= sq) {
+                delete packet;
+                return;
+            }
+            // This only process the first packet, but it is possible to receive other packets with better routes to the CH
+            // This should be take into account
+
+            if (clusterInfo->getTypePacket() == CHADVERT) {
+                L3Address next = packet->getTag<L3AddressInd>()->getSrcAddress();
+                addClusterHead(sender, clusterInfo->getDistance()+1, next, clusterInfo->getPosition(), clusterInfo->getSpeed());
+            }
+            else if (clusterInfo->getTypePacket() == CHENDADVERT) {
+                deleteClusterHead(sender);
+            }
+            // check if cluster head present
+            L3Address chAddr;
+            if (getBestClusterHead(chAddr)) {
+                if (getDistanceClusterHead(chAddr) == 1) {
+                    // start video transmitting to the cluster head.
+                    if (streamVector.empty()) {
+                        // start video sequence
+                        processStreamRequest(nullptr);
+                    }
+                }
+            }
+            seqNumbers[sender] = sq;
+            if (clusterInfo->getNumHops() > 1) {
+                auto clusterInfoAux = dynamicPtrCast<AdvertClusterHead>(clusterInfo->dupShared());
+                clusterInfoAux->setDistance(clusterInfo->getDistance()+1);
+                clusterInfoAux->setNumHops(clusterInfo->getNumHops()-1);
+                auto pktAux = new Packet(packet->getName());
+                pktAux->insertAtFront(clusterInfoAux);
+
+                // re-broadcast
+                auto *timer = new PacketHolderMessage("UdpVideoSend-send-jitter", KIND_DELAYEDSEND);
+                timer->setOwnedPacket(pktAux);
+                pendingSend.insert(timer);
+                scheduleAt(simTime()+*jitterPar, timer);
+                //socket.sendTo(packet, myAddress.getAddressType()->getBroadcastAddress(), localPort);
+            }
+
+            delete packet;
+        }
+        else if (dynamicPtrCast<const ActualizeData> (chuck)) {
+            // send to the CH
+            auto destAddr = getNextHopBestClusterHead();
+            if (destAddr.isUnspecified())
+                delete packet; // Should send a error?
+            else {
+                packet->trim();
+                packet->clearTags();
+                int interfaceId = CHK(interfaceTable->findInterfaceByName(par("broadcastInterface")))->getInterfaceId(); // TODO: Implement: support for multiple interfaces
+                packet->addTagIfAbsent<InterfaceReq>()->setInterfaceId(interfaceId);
+                socket.sendTo(packet, destAddr, localPort);
+            }
+        }
+        else
+            delete packet;
+    }
+}
+#endif
+
 
 void UdpVideoSend::socketErrorArrived(UdpSocket *socket, Indication *indication)
 {
@@ -469,31 +741,46 @@ void UdpVideoSend::processStopRequest(Packet *msg)
         delete msg;
         return;
     }
-    // register video stream...
-
-    // check if this node is sending the video alredy
+    // check if this node is sending the video already
     if (streamVector.empty()) {
         delete msg;
         return;
     }
     if (streamVector.size() > 1)
         throw cRuntimeError("streamVector.size() > 1");
-    cancelAndDelete(streamVector.front().timer);
-    streamVector.clear();
+    // check if there is a valid cluster Head
+
+    if (getNextHopBestClusterHead().isUnspecified()) {
+        cancelAndDelete(streamVector.front().timer);
+        lastSeqNum += (trace[streamVector.front().traceIndex].seqNum+1);
+        streamVector.clear();
+    }
+    delete msg;
 }
+
+
+
 
 void UdpVideoSend::processStreamRequest(Packet *msg)
 {
     // check if the sender is the controller, in other case delete the packet
-    if (controller != msg->getSenderModule()) {
+    if (nullptr != msg && msg->getSenderModule() != controller) {
         delete msg;
         return;
     }
     // register video stream...
 
-    // check if this node is sending the video alredy
+    // check if this node is sending the video already
     if (!streamVector.empty()) {
-        delete msg;
+        if (nullptr != msg)
+            delete msg;
+        return;
+    }
+
+    // check cluster heads
+    if (!iamClusterHead && getNextHopBestClusterHead().isUnspecified()) {
+        if (nullptr != msg)
+            delete msg;
         return;
     }
 
@@ -503,6 +790,8 @@ void UdpVideoSend::processStreamRequest(Packet *msg)
     d->timer = timer;
     // d->videoSize = (*videoSize);
     // d->bytesLeft = d->videoSize;
+    d->bytesLeft = -1; // no ending until the order arrives
+
     d->traceIndex = 0;
     d->timeInit = simTime();
     d->fileTrace = false;
@@ -515,11 +804,13 @@ void UdpVideoSend::processStreamRequest(Packet *msg)
 
     if (!trace.empty())
         d->fileTrace = true;
-    delete msg;
     // ... then transmit first packet right away
     sendStreamData(timer);
 
     numStreams++;
+
+    if (msg != nullptr)
+        delete msg;
     //emit(reqStreamBytesSignal, d->videoSize);
 }
 
@@ -537,13 +828,23 @@ void UdpVideoSend::sendStreamData(cMessage *timer)
         }
     }
 
-
     if (it == streamVector.end())
         throw cRuntimeError("Model error: Stream not found for timer");
 
+    // check cluster heads
+    if (!iamClusterHead && getNextHopBestClusterHead().isUnspecified()) {
+        // cancel
+        if (!trace.empty())
+            lastSeqNum += (trace[streamVector.front().traceIndex].seqNum+1);
+        streamVector.erase(it);
+        cancelAndDelete(timer);
+        return;
+    }
 
     // if stop time, cancel
     if (d->stopTime > 0 && d->stopTime < simTime()) {
+        if (!trace.empty())
+            lastSeqNum += (trace[streamVector.front().traceIndex].seqNum+1);
         streamVector.erase(it);
         cancelAndDelete(timer);
         return;
@@ -551,26 +852,40 @@ void UdpVideoSend::sendStreamData(cMessage *timer)
 
     // if not cluster head no to send video
     if (!iamClusterHead) {
-        streamVector.erase(it);
-        cancelAndDelete(timer);
-        return;
+        int dist = 100;
+        auto destAddr = getNextHopBestClusterHead();
+        if (!destAddr.isUnspecified())
+            dist = getDistanceClusterHead(destAddr);
+        if (dist > 1 || dist == -1) {
+            if (!trace.empty())
+                lastSeqNum += (trace[streamVector.front().traceIndex].seqNum+1);
+            streamVector.erase(it);
+            cancelAndDelete(timer);
+            return;
+        }
     }
 
     // send
-
     Packet *pkt = new Packet("VideoStrmPk");
     if (!d->fileTrace) {
         long pktLen = packetLen->intValue();
 
-        if (pktLen > d->bytesLeft)
+        if (d->bytesLeft != -1 && pktLen > d->bytesLeft)
             pktLen = d->bytesLeft;
 
-        const auto& payload = makeShared<ByteCountChunk>(B(pktLen));
+        const auto& payload = makeShared<VideoPacket>();
+        payload->setChunkLength(B(pktLen));
+        payload->setFrameSize(B(pktLen));
+        payload->setSeqNum(d->numPkSent);
+
         payload->addTag<CreationTimeTag>()->setCreationTime(simTime());
+
+
         pkt->insertAtBack(payload);
 
         if (d->bytesLeft != -1)
             d->bytesLeft -= pktLen;
+
         d->numPkSent++;
         numPkSent++;
         // reschedule timer if there's bytes left to send
@@ -591,12 +906,47 @@ void UdpVideoSend::sendStreamData(cMessage *timer)
                 const auto& videopk = makeShared<VideoPacket>();
                 videopk->setChunkLength(b(trace[d->traceIndex].size));
                 videopk->setType(trace[d->traceIndex].type);
-                videopk->setSeqNum(trace[d->traceIndex].seqNum);
-                videopk->addTag<CreationTimeTag>()->setCreationTime(simTime());
+
                 auto len = B(videopk->getChunkLength());
                 videopk->setFrameSize(len);
+
+                if (trace[d->traceIndex].type == 'P' || trace[d->traceIndex].type == 'p') {
+                    totalSendP++;
+                    totalBytesSendP += len.get();
+                    if (iamClusterHead)
+                        totalBytesSendPCh += len.get();
+                    else
+                        totalBytesSendPCl += len.get();
+                }
+                if (trace[d->traceIndex].type == 'I' || trace[d->traceIndex].type == 'i') {
+                    totalSendI++;
+                    totalBytesSendI += len.get();
+                    if (iamClusterHead)
+                        totalBytesSendICh += len.get();
+                    else
+                        totalBytesSendICl += len.get();
+                }
+                if (trace[d->traceIndex].type == 'B' || trace[d->traceIndex].type == 'b') {
+                    totalSendB++;
+                    totalBytesSendB += len.get();
+                    if (iamClusterHead)
+                        totalBytesSendBCh += len.get();
+                    else
+                        totalBytesSendBCl += len.get();
+                }
+
+
+                videopk->setSeqNum(trace[d->traceIndex].seqNum + lastSeqNum);
+                videopk->addTag<CreationTimeTag>()->setCreationTime(simTime());
+
                 pkt->insertAtBack(videopk);
+                size = pkt->getByteLength();
                 d->traceIndex++;
+                if (d->traceIndex >= trace.size()) {
+                    lastSeqNum += (trace.back().seqNum+1);
+                    d->traceIndex = 0;
+                    d->timeInit = simTime();
+                }
             } while((size + trace[d->traceIndex].size/8 < maxSizeMacro) && (d->traceIndex < trace.size()));
 
         }
@@ -606,12 +956,23 @@ void UdpVideoSend::sendStreamData(cMessage *timer)
             videopk->setChunkLength(b(trace[d->traceIndex].size));
 
             videopk->setType(trace[d->traceIndex].type);
-            videopk->setSeqNum(trace[d->traceIndex].seqNum);
+            if (trace[d->traceIndex].type == 'P' || trace[d->traceIndex].type == 'p')
+                totalSendP++;
+            if (trace[d->traceIndex].type == 'I' || trace[d->traceIndex].type == 'i')
+                totalSendI++;
+            if (trace[d->traceIndex].type == 'B' || trace[d->traceIndex].type == 'b')
+                totalSendB++;
+
+            videopk->setSeqNum(trace[d->traceIndex].seqNum + lastSeqNum);
             auto len = B(videopk->getChunkLength());
             videopk->addTag<CreationTimeTag>()->setCreationTime(simTime());
             videopk->setFrameSize(len);
             pkt->insertAtBack(videopk);
             d->traceIndex++;
+            if (d->traceIndex >= trace.size()) {
+                lastSeqNum += (trace.back().seqNum+1);
+                d->traceIndex = 0;
+            }
         }
         if (d->traceIndex >= trace.size())
             deleteTimer = true;
@@ -626,9 +987,23 @@ void UdpVideoSend::sendStreamData(cMessage *timer)
     control->setTypePacket(VIDEODATA);
     pkt->insertAtFront(control);
 
-    sendToControl(pkt);
+    if (iamClusterHead)
+        sendToControl(pkt);
+    else {
+        auto destAddr = getNextHopBestClusterHead();
+        if (destAddr.isUnspecified())
+            delete pkt; // Should send a error?
+        else {
+            int interfaceId = CHK(interfaceTable->findInterfaceByName(par("broadcastInterface")))->getInterfaceId(); // TODO: Implement: support for multiple interfaces
+            pkt->addTagIfAbsent<InterfaceReq>()->setInterfaceId(interfaceId);
+            socket.sendTo(pkt, destAddr, localPort);
+        }
+    }
+
     emit(sentPkSignal, pkt);
     if (deleteTimer) {
+        if (!trace.empty())
+            lastSeqNum += (trace[streamVector.front().traceIndex].seqNum+1);
         streamVector.erase(it);
         delete timer;
     }
@@ -641,23 +1016,35 @@ void UdpVideoSend::clearStreams()
     streamVector.clear();
 }
 
+/*
 void UdpVideoSend::handleStartOperation(LifecycleOperation *operation)
 {
-    socket.setOutputGate(gate("socketOut"));
-    socket.bind(localPort);
-    socket.setCallback(this);
+    simtime_t start = std::max(startTime, simTime());
+    if ((stopTime < SIMTIME_ZERO) || (start < stopTime) || (start == stopTime && startTime == stopTime)) {
+        selfMsg->setKind(START);
+        scheduleAt(start, selfMsg);
+    }
+}
+*/
+
+void UdpVideoSend::handleStartOperation(LifecycleOperation *operation)
+{
+
 }
 
 void UdpVideoSend::handleStopOperation(LifecycleOperation *operation)
 {
+    cancelEvent(selfMsg);
     clearStreams();
     socket.setCallback(nullptr);
     socket.close();
     delayActiveOperationFinish(par("stopOperationTimeout"));
 }
 
+
 void UdpVideoSend::handleCrashOperation(LifecycleOperation *operation)
 {
+    cancelEvent(selfMsg);
     clearStreams();
     if (operation->getRootModule() != getContainingNode(this))     // closes socket when the application crashed only
         socket.destroy();    //TODO  in real operating systems, program crash detected by OS and OS closes sockets of crashed programs.
